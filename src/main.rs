@@ -1,11 +1,11 @@
 #![feature(async_await)]
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use futures::{join, prelude::*};
+use futures::{join, prelude::*, lock::Mutex};
 use hyper::client::HttpConnector;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Error, Request, Response, Server, Uri};
@@ -49,7 +49,7 @@ async fn main() {
         eprintln!("server error: {}", e);
     }
 
-    let shutdown_duration = Instant::now().duration_since(app.shutdown_at.lock().unwrap().unwrap());
+    let shutdown_duration = Instant::now().duration_since(app.shutdown_at.lock().await.unwrap());
     println!("Server gracefuly shutdown, taking {:?}", shutdown_duration);
 }
 
@@ -118,9 +118,9 @@ async fn multi(app: &Arc<App>) -> Result<Response<Body>, Error> {
 }
 
 async fn shutdown(app: &Arc<App>) -> Response<Body> {
-    let message = match app.shutdown_tx.lock().unwrap().take() {
+    let message = match app.shutdown_tx.lock().await.take() {
         Some(tx) => {
-            *app.shutdown_at.lock().unwrap() = Some(Instant::now());
+            *app.shutdown_at.lock().await = Some(Instant::now());
             tx.send(()).ok();
             "Initiating graceful shutdown"
         }
