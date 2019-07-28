@@ -7,6 +7,7 @@ pub(crate) enum Error {
     Hyper(hyper::Error),
     Http(hyper::http::Error),
     Application,
+    ApplicationPanic(String),
 }
 
 impl Default for Error {
@@ -29,16 +30,13 @@ impl From<hyper::http::Error> for Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(std::error::Error::description(self))
-    }
-}
-
-impl std::error::Error for Error {
-    fn description(&self) -> &str {
         match self {
-            Error::Hyper(e) => e.description(),
-            Error::Http(e) => e.description(),
-            Error::Application => "Unspecified application error",
+            Error::Hyper(e) => e.fmt(f),
+            Error::Http(e) => e.fmt(f),
+            Error::Application => f.write_str("Unspecified application error"),
+            Error::ApplicationPanic(s) => f.write_str(&*format!("Application panicked: {}", s)),
         }
     }
 }
+
+impl std::error::Error for Error {}

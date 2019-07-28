@@ -63,7 +63,6 @@ async fn main() {
 }
 
 async fn middleware(app: Arc<App>, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-    // TODO: Catch panics
     let begin_at = Instant::now();
     let path = req
         .uri()
@@ -71,13 +70,27 @@ async fn middleware(app: Arc<App>, req: Request<Body>) -> Result<Response<Body>,
         .map(ToString::to_string)
         .unwrap_or_else(Default::default);
 
-    let response = router(app, req).await.or_else(|e| {
-        error!("Application error: {}", e);
-        Ok(Response::builder()
-            .status(500)
-            .body("Internal server error".into())
-            .unwrap())
-    });
+    let response = std::panic::AssertUnwindSafe(router(app, req));
+    let response = response
+        .catch_unwind()
+        .unwrap_or_else(|e| {
+            let desc = match e.downcast_ref::<&'static str>() {
+                Some(s) => *s,
+                None => match e.downcast_ref::<String>() {
+                    Some(s) => &s[..],
+                    None => "Box<Any>",
+                },
+            };
+            Err(Error::ApplicationPanic(desc.to_string()))
+        })
+        .await
+        .or_else(|e| {
+            error!("Application error: {}", e);
+            Ok(Response::builder()
+                .status(500)
+                .body("Internal server error".into())
+                .unwrap())
+        });
 
     info!(
         "Request to `{}` took {:?}",
@@ -93,7 +106,7 @@ async fn router(app: Arc<App>, req: Request<Body>) -> AppResponse {
         "/error" => Err(Default::default()),
         "/multi" => multi(&app).await,
         "/port" => port(&app),
-        "/panic" => panic!("Intentional panic from `/panic`"), // FIXME: takes down the whole server. because of single threaded runtime, file upstream bug?
+        "/panic" => panic!("Intentional panic from `/panic`"),
         "/pause" => pause(req).await,
         "/shutdown" => shutdown(&app).await,
         _ => not_found(),
