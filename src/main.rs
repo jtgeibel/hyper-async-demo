@@ -1,16 +1,23 @@
 #![feature(async_await)]
+#![warn(clippy::all)]
 
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use futures::{join, prelude::*, lock::Mutex};
+use futures::{join, lock::Mutex, prelude::*};
 use hyper::client::HttpConnector;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Error, Request, Response, Server, Uri};
+use hyper::{Body, Client, Request, Response, Server, Uri};
+use log::{error, info};
+
+mod error;
+use error::Error;
 
 const DEFAULT_PORT: u16 = 3000;
+
+type AppResponse = Result<Response<Body>, Error>;
 
 struct App {
     client: Client<HttpConnector>,
@@ -21,6 +28,8 @@ struct App {
 
 #[tokio::main(single_thread)]
 async fn main() {
+    env_logger::init();
+
     let port = std::env::var("PORT")
         .map(|s| s.parse().unwrap_or(DEFAULT_PORT))
         .unwrap_or(DEFAULT_PORT);
@@ -36,7 +45,7 @@ async fn main() {
 
     let make_service = make_service_fn(|_| {
         let app = app.clone();
-        async { Ok::<_, Error>(service_fn(move |req| router(app.clone(), req))) }
+        async { Ok::<_, Error>(service_fn(move |req| middleware(app.clone(), req))) }
     });
 
     let server = Server::bind(&([127, 0, 0, 1], port).into())
@@ -53,40 +62,66 @@ async fn main() {
     println!("Server gracefuly shutdown, taking {:?}", shutdown_duration);
 }
 
-async fn router(app: Arc<App>, req: Request<Body>) -> Result<Response<Body>, Error> {
+async fn middleware(app: Arc<App>, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    // TODO: Catch panics
+    let begin_at = Instant::now();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(ToString::to_string)
+        .unwrap_or_else(Default::default);
+
+    let response = router(app, req).await.or_else(|e| {
+        error!("Application error: {}", e);
+        Ok(Response::builder()
+            .status(500)
+            .body("Internal server error".into())
+            .unwrap())
+    });
+
+    info!(
+        "Request to `{}` took {:?}",
+        path,
+        Instant::now().duration_since(begin_at)
+    );
+    response
+}
+
+async fn router(app: Arc<App>, req: Request<Body>) -> AppResponse {
     match req.uri().path() {
-        "/" => Ok(index()),
+        "/" => index(),
+        "/error" => Err(Default::default()),
         "/multi" => multi(&app).await,
-        "/port" => Ok(port(&app)),
+        "/port" => port(&app),
         "/panic" => panic!("Intentional panic from `/panic`"), // FIXME: takes down the whole server. because of single threaded runtime, file upstream bug?
-        "/pause" => Ok(pause(req).await),
-        "/shutdown" => Ok(shutdown(&app).await),
-        _ => Ok(not_found()),
+        "/pause" => pause(req).await,
+        "/shutdown" => shutdown(&app).await,
+        _ => not_found(),
     }
 }
 
-fn not_found() -> Response<Body> {
+fn not_found() -> AppResponse {
     Response::builder()
         .status(404)
         .body("Not found".into())
-        .unwrap()
+        .map_err(Into::into)
 }
 
-fn index() -> Response<Body> {
+fn index() -> AppResponse {
     Response::builder()
         .status(200)
         .body("Hello from `/`".into())
-        .unwrap()
+        .map_err(Into::into)
 }
 
-fn port(app: &Arc<App>) -> Response<Body> {
+fn port(app: &Arc<App>) -> AppResponse {
     Response::builder()
         .status(200)
         .body(app.port.to_string().into())
-        .unwrap()
+        .map_err(Into::into)
 }
 
-async fn multi(app: &Arc<App>) -> Result<Response<Body>, Error> {
+async fn multi(app: &Arc<App>) -> AppResponse {
     let authority = format!("127.0.0.1:{}", app.port);
     let build_uri = |p_and_q| {
         Uri::builder()
@@ -94,30 +129,29 @@ async fn multi(app: &Arc<App>) -> Result<Response<Body>, Error> {
             .authority(authority.as_str())
             .path_and_query(p_and_q)
             .build()
-            .unwrap()
     };
 
     let begin_at = Instant::now();
 
     // Spawn concurrent requests to slow endpoints
-    let fut1 = app.client.get(build_uri("/pause?1000"));
-    let fut2 = app.client.get(build_uri("/pause?5000"));
+    let fut1 = app.client.get(build_uri("/pause?1000")?);
+    let fut2 = app.client.get(build_uri("/pause?5000")?);
     let (res1, res2) = join!(fut1, fut2);
 
     let duration = Instant::now().duration_since(begin_at);
     let message = format!(
         "Total duration: {:?}, Response 1: {}, Response 2: {}",
         duration,
-        String::from_utf8_lossy(&res1.unwrap().into_body().try_concat().await.unwrap()),
-        String::from_utf8_lossy(&res2.unwrap().into_body().try_concat().await.unwrap()),
+        String::from_utf8_lossy(&res1?.into_body().try_concat().await?),
+        String::from_utf8_lossy(&res2?.into_body().try_concat().await?),
     );
-    Ok(Response::builder()
+    Response::builder()
         .status(200)
         .body(message.into())
-        .unwrap())
+        .map_err(Into::into)
 }
 
-async fn shutdown(app: &Arc<App>) -> Response<Body> {
+async fn shutdown(app: &Arc<App>) -> AppResponse {
     let message = match app.shutdown_tx.lock().await.take() {
         Some(tx) => {
             *app.shutdown_at.lock().await = Some(Instant::now());
@@ -130,10 +164,10 @@ async fn shutdown(app: &Arc<App>) -> Response<Body> {
     Response::builder()
         .status(200)
         .body(message.into())
-        .unwrap()
+        .map_err(Into::into)
 }
 
-async fn pause(req: Request<Body>) -> Response<Body> {
+async fn pause(req: Request<Body>) -> AppResponse {
     const DEFAULT_DELAY: u64 = 500;
     let millis = req
         .uri()
@@ -145,5 +179,5 @@ async fn pause(req: Request<Body>) -> Response<Body> {
     Response::builder()
         .status(200)
         .body(message.into())
-        .unwrap()
+        .map_err(Into::into)
 }
