@@ -1,9 +1,7 @@
 use std::fmt;
 
 #[derive(Debug)]
-pub(crate) enum Error {
-    //Io(std::io::Error),
-    //Uri(uri::Error),
+pub(super) enum Error {
     Hyper(hyper::Error),
     Http(hyper::http::Error),
     Application,
