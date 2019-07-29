@@ -49,7 +49,7 @@ async fn main() {
         async { Ok::<_, Error>(service_fn(move |req| middleware(app.clone(), req))) }
     });
 
-    let server = Server::bind(&([127, 0, 0, 1], port).into())
+    let server = Server::bind(&([0, 0, 0, 0], port).into())
         .serve(make_service)
         .with_graceful_shutdown(async {
             rx.await.ok();
