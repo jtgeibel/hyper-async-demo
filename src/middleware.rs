@@ -2,8 +2,8 @@ use crate::error::Error;
 use crate::router::router;
 use crate::App;
 use std::any::Any;
-use std::sync::Arc;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures::prelude::*;
